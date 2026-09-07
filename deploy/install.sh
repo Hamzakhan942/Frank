@@ -12,7 +12,8 @@ REPO_URL="${WATCHER_REPO:-https://github.com/roloc/watcher.git}"
 id watcher >/dev/null 2>&1 || useradd -m -s /bin/bash watcher
 
 if [ -d /opt/watcher/.git ]; then
-  git -C /opt/watcher pull -q --ff-only || echo "warning: /opt/watcher pull failed (no GitHub credentials yet?) — using what is there" >&2
+  # As the watcher user: it holds the gh login, and the checkout is its own.
+  su - watcher -c "git -C /opt/watcher pull -q --ff-only" || echo "warning: /opt/watcher pull failed (watcher user not logged in to gh yet?) — using what is there" >&2
 elif [ ! -d /opt/watcher ]; then
   git clone -q "$REPO_URL" /opt/watcher || { echo "clone failed — rsync the repo to /opt/watcher instead" >&2; exit 1; }
 fi
