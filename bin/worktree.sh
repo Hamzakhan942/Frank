@@ -237,7 +237,9 @@ cmd_remove() {
       exit 1
     fi
     local pr_line
-    if ! pr_line="$(gh pr list --head "$branch" --state merged --limit 1 \
+    # From $MAIN: gh resolves the repo from the cwd, and the caller (the spawner) may be
+    # anywhere — without this, every remove reported "gh not authenticated".
+    if ! pr_line="$(cd "$MAIN" && gh pr list --head "$branch" --state merged --limit 1 \
                       --json number,headRefOid \
                       --jq '.[] | "\(.number) \(.headRefOid)"' 2>/dev/null)"; then
       echo "error: could not ask GitHub about '$branch' (gh not authenticated?)." >&2
