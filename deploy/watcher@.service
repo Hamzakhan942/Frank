@@ -1,0 +1,25 @@
+# One watcher instance per project: `systemctl enable --now watcher@riffmap`.
+# /etc/watcher/env holds the Claude login token (CLAUDE_CODE_OAUTH_TOKEN) and nothing else;
+# it must NOT export ANTHROPIC_API_KEY — the key outranks the login and would bill the API.
+[Unit]
+Description=Board watcher for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=watcher
+Group=watcher
+WorkingDirectory=/opt/watcher
+EnvironmentFile=/etc/watcher/env
+Environment=WATCHER_PROJECT=/opt/watcher/projects/%i.env
+Environment=HOME=/home/watcher
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/watcher/bin/spawn.sh
+Restart=always
+RestartSec=30
+KillMode=control-group
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
