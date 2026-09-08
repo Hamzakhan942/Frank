@@ -35,12 +35,20 @@
 #   POLL_INTERVAL      daemon poll cadence in SECONDS           (default: 60)
 #   WATCHER_MAX_POLLS  stop the daemon loop after this many polls (tests only)
 #
+# Exported to the tick (so `/watch` can read the watcher's own docs from any worktree):
+#   WATCHER_HOME       this repo's root                          (default: parent of bin/)
+#
+# Every comment this script leaves on a card is read by Steve on his phone. The shape is
+# fixed by docs/talking-to-steve.md: first line is the ask, bullets, one question, lettered
+# options, how to answer. test-spawn.sh checks the park comment keeps that shape.
+#
 #   bin/spawn.sh              # the daemon loop (what systemd runs)
 #   bin/spawn.sh --dry-run    # print the pick + the exact claude command, exit 0
 #   bin/spawn.sh --once       # one poll iteration, then exit (tests)
 set -euo pipefail
 
 WATCHER_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export WATCHER_HOME="${WATCHER_HOME:-$(dirname "$WATCHER_HERE")}"
 if [ -n "${WATCHER_PROJECT:-}" ]; then
   # shellcheck disable=SC1090
   . "$WATCHER_PROJECT"
@@ -49,6 +57,12 @@ WATCHER_ROOT="${WATCHER_ROOT:-${PROJECT_ROOT:-}}"
 [ -n "$WATCHER_ROOT" ] || { echo "spawn.sh: set WATCHER_PROJECT=projects/<name>.env (or WATCHER_ROOT)" >&2; exit 64; }
 PROJECT_NAME="${PROJECT_NAME:-$(basename "$WATCHER_ROOT")}"
 export BOARD_OWNER="${BOARD_OWNER:-}" BOARD_NUMBER="${BOARD_NUMBER:-}"
+# The repo the cards live in. `gh` infers a repo from the cwd, and this script's cwd is
+# /opt/watcher — a checkout of the WATCHER, not the project — so on the first night every
+# unclaim and sweeper comment hit the wrong repo and three finished cards sat in-flight
+# (watcher#3). GH_REPO pins every repo-scoped gh call here AND in board.py (a child).
+PROJECT_REPO="${PROJECT_REPO:-$(git -C "$WATCHER_ROOT" remote get-url origin 2>/dev/null | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##')}"
+[ -n "$PROJECT_REPO" ] && export GH_REPO="$PROJECT_REPO"
 WATCHER_CLAUDE="${WATCHER_CLAUDE:-claude}"
 WATCHER_GH="${WATCHER_GH:-gh}"
 WATCHER_BOARD="${WATCHER_BOARD:-python3 $WATCHER_HERE/board.py}"
@@ -127,6 +141,9 @@ poll_board() {
   if ROWS="$($WATCHER_BOARD list "In progress" 2>"$errfile")"; then
     BOARD_ERR="$(cat "$errfile" 2>/dev/null)"
     rm -f "$errfile"
+    # The Waiting stage: cards Steve dragged there on the Stage-grouped view. Best-effort —
+    # a failure here must not stop In progress from being served, so it only logs.
+    QUEUE_ROWS="$($WATCHER_BOARD queue 2>/dev/null)" || { QUEUE_ROWS=""; log "board.py queue failed; serving In progress only"; }
     return 0
   else
     BOARD_ERR="$(cat "$errfile" 2>/dev/null)"
@@ -172,8 +189,10 @@ board_show_retry() {
 pick_card() {
   ISSUE=""; PRIORITY=""; AGENT=""; TITLE=""
   local r_issue r_priority r_agent r_flags r_title attempts attn parked_ok parked_tried
-  while IFS=$'\t' read -r r_issue r_priority r_agent r_flags r_title; do
+  while IFS=$'\t' read -r r_issue r_priority r_agent r_flags r_stage r_title; do
     [ -z "$r_issue" ] && continue
+    # Five-column rows (an older board.py, or the tests' fixtures) have no stage column.
+    if [ -z "$r_title" ]; then r_title="$r_stage"; r_stage=""; fi
     case ",$r_flags," in
       *,in-flight,*) log "#$r_issue skipped: in-flight"; continue ;;
     esac
@@ -226,13 +245,13 @@ pick_card() {
       # board mutation dry-run is explicitly not supposed to make.
       log "#$r_issue skipped: $attempts attempts, parking in Stuck"
       if [ "${DRY_RUN:-0}" != 1 ]; then
-        park_stuck "$r_issue" "Still In progress with $attempts attempts on file when pick_card looked at it (a previous park_stuck call may have failed)."
+        park_stuck "$r_issue" "The card was still In progress with $attempts attempts on file (an earlier move to Stuck may have failed)."
       fi
       continue
     fi
     ISSUE="$r_issue"; PRIORITY="$r_priority"; AGENT="$r_agent"; TITLE="$r_title"
     return 0
-  done <<< "$ROWS"
+  done <<< "${1-$ROWS}"
   return 1
 }
 
@@ -304,12 +323,37 @@ park_stuck() {
 
   $WATCHER_GH issue edit "$n" --remove-label in-flight || true
   local retry_note=""
-  [ -f "$ok" ] || retry_note=" The move to Stuck - Needs help failed; the spawner will keep retrying it on later polls."
+  [ -f "$ok" ] || retry_note=$'\n- The move to Stuck did not go through yet; I will keep retrying it.'
   # The marker means "the one Stuck comment was POSTED" (review round 7): it is written only
   # when `gh issue comment` succeeds, so a failed comment is retried on the next poll — a
   # retry there costs nothing, and a parked card with no explanation on it is what the
   # marker exists to prevent, not to cause.
-  if $WATCHER_GH issue comment "$n" --body "🤖 Watcher: #$n has had 2 attempts with no progress; parking in Stuck - Needs help.$retry_note $detail"; then
+  #
+  # The body is for Steve (docs/talking-to-steve.md): the ask on line one, bullets, one
+  # question, lettered options with the recommendation first, and how to answer. The
+  # spawner only knows the card failed twice, not why, so the options are the three moves
+  # Steve can make; $detail and the log path are the engineer's crumbs, kept short.
+  local body
+  body="🤖 **Needs Steve: this card failed 2 attempts, so I parked it.**
+
+- Moved to **Stuck - Needs help**. The bots will not retry on their own.
+- Why: $detail${retry_note}
+
+**Question: what should happen to this card?**
+- **A. Try again** (recommended if the failure looks like bad luck) — move it back to **In progress**.
+- **B. Fix the card first** — make it smaller or clearer, then move it back to **In progress**.
+- **C. Drop it** — close the card.
+
+Reply A, B or C on this card, then move it.
+
+<details><summary>Details</summary>
+
+- Logs: $WATCHER_LOGS
+- Attempts on file: 2
+
+</details>"
+  $WATCHER_BOARD stage "$n" Parked >/dev/null 2>&1 || true
+  if $WATCHER_GH issue comment "$n" --body "$body"; then
     : > "$tried"
   else
     log "stuck comment failed for #$n; retried on a later poll only while the card is still seen in In progress (once the move lands, nothing re-enters park_stuck)"
@@ -334,8 +378,8 @@ do_dry_run() {
     echo "dry-run: board.py failed: $BOARD_ERR" >&2
     exit 1
   fi
-  if ! pick_card; then
-    echo "dry-run: nothing claimable in In progress"
+  if ! pick_card "$ROWS" && ! { [ -n "${QUEUE_ROWS:-}" ] && pick_card "$QUEUE_ROWS"; }; then
+    echo "dry-run: nothing claimable in In progress or Waiting"
     exit 0
   fi
   local dir="$WORKTREE_BASE/card-$ISSUE" ts
@@ -356,7 +400,7 @@ prepare_worktree() {
       local attempts
       attempts="$(bump_attempts "$n")"
       if [ "$attempts" -ge 2 ]; then
-        park_stuck "$n" "worktree create failed twice in a row; see $WATCHER_LOGS/spawn.log."
+        park_stuck "$n" "Could not create the card's work folder (git worktree) twice in a row."
       fi
       return 1
     fi
@@ -538,7 +582,13 @@ except Exception:
   # Only ever sweeps the card THIS run holds — never a claim it did not make.
   if [ "$has_in_flight" = yes ] && [ "$(cat "$CURRENTFILE" 2>/dev/null || true)" = "$n" ]; then
     $WATCHER_BOARD unclaim "$n" || log "unclaim failed for #$n"
-    $WATCHER_GH issue comment "$n" --body "🤖 Watcher: tick exited ${rc}/${subtype} after ${elapsed_min} min, ${denials:-0} permission denials, agent cost \$${total_cost:-0}; log $(basename "$json")" \
+    # FYI-shaped (docs/talking-to-steve.md): nothing is asked of Steve here — the card is
+    # released and the next poll may retry it; two of these in a row become a park.
+    $WATCHER_GH issue comment "$n" --body "🤖 FYI: the run ended without finishing this card. I released it; the next poll may retry once.
+- Exit: ${rc}/${subtype} after ${elapsed_min} min
+- ${denials:-0} permission denials
+- Agent cost: \$${total_cost:-0}
+- Log: $(basename "$json")" \
       || log "sweeper comment failed for #$n"
   fi
 
@@ -554,7 +604,7 @@ except Exception:
   else
     attempts="$(bump_attempts "$n")"
     if [ "$attempts" -ge 2 ] && [ "$is_in_progress" = yes ]; then
-      park_stuck "$n" "Still In progress. See $(basename "$json") and earlier logs in $WATCHER_LOGS."
+      park_stuck "$n" "The run ended with the card still In progress (log: $(basename "$json"))."
     fi
   fi
 
@@ -632,10 +682,10 @@ except Exception:
     local attempts
     attempts="$(bump_attempts "$n")"
     $WATCHER_BOARD unclaim "$n" || log "reconcile: unclaim failed for #$n"
-    $WATCHER_GH issue comment "$n" --body "🤖 Watcher: found #$n still marked in-flight with no tick process running (a stale claim, from a crashed run or a board outage at the previous exit); unclaiming." \
+    $WATCHER_GH issue comment "$n" --body "🤖 FYI: a run died while holding this card (still marked in-flight, no process running). I released it; the next poll may retry." \
       || log "reconcile: unclaim comment failed for #$n"
     if [ "$attempts" -ge 2 ]; then
-      park_stuck "$n" "Reached via reconciliation after a stale in-flight claim (a crashed tick or a board.py outage at a previous exit), attempts=$attempts."
+      park_stuck "$n" "A run died holding this card (a crashed tick, or a board outage at its exit); found on cleanup, attempts=$attempts."
     fi
   else
     log "reconcile: #$n was not in-flight; nothing to unclaim"
@@ -660,12 +710,31 @@ tick_once() {
     return 2
   fi
 
-  if ! pick_card; then
+  QUEUED=0
+  if ! pick_card "$ROWS"; then
+    if [ -n "${QUEUE_ROWS:-}" ] && pick_card "$QUEUE_ROWS"; then
+      QUEUED=1
+    else
+      log "nothing claimable in In progress or Waiting"
+    fi
+  fi
+  if [ -z "$ISSUE" ]; then
     log "nothing claimable in In progress"
     return 0
   fi
 
   log "picked #$ISSUE ($PRIORITY) $TITLE"
+  if [ "$QUEUED" = 1 ]; then
+    # Status stays truthful: a card the watcher works is In progress, whatever column it
+    # was dragged from. If the move fails, don't launch — the tick's claim would then
+    # sit on a card the board says nobody is working.
+    if $WATCHER_BOARD move "$ISSUE" "In progress"; then
+      log "#$ISSUE taken from Waiting → In progress"
+    else
+      log "#$ISSUE: could not move from Waiting to In progress; not launching"
+      return 1
+    fi
+  fi
 
   if ! prepare_worktree "$ISSUE"; then
     log "aborting this poll for #$ISSUE: worktree not ready"
