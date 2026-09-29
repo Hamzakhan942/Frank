@@ -367,9 +367,14 @@ https://example.com` sends one by hand.
   the two in one card.
 - **A symptom card is not done until its symptom is checked again.** Fetch the artifact the
   card names one more time before the card closes, and say in one sentence what it now
-  shows. Still there? The card does not close, however green the build — the PR says
+  shows. Still there? The card does not close, however green the build, and however good
+  the reason it hasn't moved (deploy-gated, cached, can't restart from here) — the reason
+  explains the artifact, but it is never itself evidence the symptom is gone. The PR says
   `Refs #<n>` and the card goes to Stuck. A correct fix for the wrong cause is what this
-  catches.
+  catches. GitHub's merge-time close scan matches a closing keyword next to the card's
+  number wherever that pairing sits in the body, meaning included or not — so a card
+  staying open means that keyword and the number never appear next to each other in the
+  PR body, not even inside a sentence explaining why the other keyword was chosen.
 - **A spawned card re-reads the complaint at the root of its chain**, not only the card that
   filed it, and says which sentence of the root it is serving. When the last card off a root
   closes, the root's own symptom is checked again and the answer is commented on the root.
