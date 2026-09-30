@@ -9,6 +9,7 @@ import glob
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -541,6 +542,18 @@ state17b = floor.build_state(PROJECTS, STATE, stub_board_fetcher, unit_active_fn
 check("a CI fetch that fails shows unknown, and its error text never reaches the page",
       all(p["ship"]["ci"] == {"state": "unknown"} for p in state17b["projects"])
       and "ghp_notreal" not in json.dumps(state17b))
+
+print("18. every clickable link opens in a new tab (card #62)")
+for snippet in (
+    '<a class="desk ship" href="${esc(st.link)}" target="_blank" rel="noopener">',
+    '<a class="desk${dispatcher ? " dispatcher" : ""}" href="${esc(d.link)}" target="_blank" rel="noopener">',
+    '<h2><a href="${esc(p.board_url)}" target="_blank" rel="noopener">${esc(p.name)}</a></h2>',
+    '<td><a href="${esc(r.card.url)}" target="_blank" rel="noopener">#${r.card.number}</a></td>',
+):
+    check(f"...{snippet[:40]}...", snippet in floor.INDEX_HTML)
+anchors = re.findall(r"<a\b[^>]*>", floor.INDEX_HTML)
+check("...and every anchor on the page carries it, so a future link can't slip through",
+      anchors and all('target="_blank"' in a for a in anchors), anchors)
 
 shutil.rmtree(ROOT, ignore_errors=True)
 
