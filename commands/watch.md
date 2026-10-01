@@ -67,17 +67,44 @@ decision card gets a written decision in `docs/`, an implementation card gets co
 tests. Use the project's own subagents (`.claude/agents/`) when the card's `agent:` label
 names one; otherwise you are the builder.
 
-**Write the plan before the first edit.** Before you touch a file, write down: the files
-that will change, in order; the test or check that proves the card is done (for a symptom
-card, the artifact you will re-fetch, §3); and the one risk you expect. Tell Steve you're
-starting — plain words, no paths above the fold (`docs/talking-to-steve.md` rule 7):
+**Write the plan before the first edit.** Before you touch a file, write down: what the
+person who asked ends up with, and where; the files that will change, in order; the test
+or check that proves the card is done (for a symptom card, the artifact you will re-fetch,
+§3); and the one risk you expect. Tell Steve you're starting — plain words, no paths above
+the fold (`docs/talking-to-steve.md` rule 7), and three bullets, which is all an `FYI:`
+gets (rule 1). The file list is for the PR body and for `reviewer`, not for him:
 
 ```
 🤖 **FYI:** plan for this card.
-- Files: <what's changing, in a sentence>
+- You get: <what Steve will see or be able to do when this is done, and where he opens it>
 - Test: <what proves it's done, in a sentence>
 - Risk: <the one thing most likely to go wrong>
 ```
+
+**`You get` comes first, and it names a place the asker can actually open.** A card is a
+request from a person who will go and use the result, so before anything else, say what
+that person ends up with and where they find it: a page and what is on it, a message in
+their channel, a column on the board. The project's `CLAUDE.md` says where its people are;
+when it does not, assume a phone and the board — **never a shell on the box**. Writing this
+line is the check: if the honest version is "a command he runs over ssh" and he does not
+use ssh, you have read the card as a different card. A short card can usually be built
+two ways that land in different places (a script and a page; a log line and an alert), and
+the title alone will not tell you which. Then:
+
+- **One of the two is somewhere the asker can open, the other is not: build the one he
+  can open.** The other may still be worth having as the part underneath it, but it is
+  never the deliverable.
+- **Both are, and they are different products: that is one question for Stuck (§4),
+  before anything is built** — the two readings as the lettered options, the one you would
+  build first. A wrong guess here costs a whole second tick and a reopened card; the
+  question costs one letter. This is the rare case: most cards have one reading that
+  lands where the asker is, and you build it without asking.
+
+(watcher [#63](https://github.com/roloc/watcher/issues/63), September 30, 2026: "Build a
+way to tail the log for a lane to see what each one is working on", body "see title". The
+tick shipped a command that runs on the box. Steve reads the floor page on his phone and
+does not ssh; he reopened the card to say so, and the second build is the one he had asked
+for.)
 
 Keep the exact list — real paths, the real check — for the PR body under `## Plan` (§3)
 and for `reviewer`, which you hand it to directly when you call it; the card comment is for
@@ -117,6 +144,19 @@ page. (riffmap [#431](https://github.com/roloc/riffmap/issues/431), September 19
 tick asked Steve which of two widgets he had seen on a specific meeting. The meeting was
 one fetch away — its data said neither widget could have drawn — so the question spent a
 day of Steve's attention on something the tick could have answered in a minute.)
+
+**Look at it the way its reader did.** A page that draws itself with its own script is
+looked at by **running it in a browser** — the project's screenshot script or browser
+tool, which its `CLAUDE.md` names — never by fetching it. `curl` returns what the server
+sent: a 200 and a complete document say the server is up, and nothing about what was on
+the screen. So "I fetched it and it loads fine" is not having looked, and it is never
+grounds for asking Steve what he saw — what he saw is a fact (below), and the browser will
+show it to you. The same goes for your own change to a page: until something has run it,
+nobody knows whether it works, however many tests read its source.
+(watcher [#71](https://github.com/roloc/watcher/issues/71), October 1, 2026: "nothing
+loads" on a page whose script did not parse. The tick fetched it five times, got five
+clean responses, and went to Stuck to ask what Steve had seen. A browser says "syntax
+error" on the first load.)
 
 **Could not look? Then you do not know — stop, never build from the description.** A
 login wall, a 401, an expired or revoked link, a page you cannot reach from this box: none
@@ -228,6 +268,15 @@ reader. If that sentence is "most of it is in one grey bucket", you have not fix
 chart, you have removed one: stop, and file the designer card instead. The `reviewer`
 treats a screen change with no picture as blocking. Tests, lint and a green build are
 not a look — they passed on [#359](https://github.com/roloc/riffmap/issues/359).
+**A screen that runs code, in a project with no way to run it, is not exempt; the project
+is missing a check.** When what you are changing is a page's own script or a template with
+logic in it — not plain text or a document — and the project's `CLAUDE.md` names no way to
+render it, the change has no gate at all: say that on the card and build the smallest way
+to run the page first (or go to Stuck if you cannot). Never ship code that only runs in a
+browser and that no browser has run. (watcher
+[#70](https://github.com/roloc/watcher/pull/70), October 1, 2026: a page's script that did
+not parse merged with every check green, because every check read the source and none ran
+it. The page drew nothing.)
 
 **Route a design card before building it.** In a project with a **triage lane**
 (`LANE_COMMAND=/triage` — see `how-it-works.md`, "Lanes"; riffmap has one) an unlabeled
@@ -274,7 +323,8 @@ Steve. **Do not do those.** Go straight to Stuck with the options laid out (§4)
   (some projects hard-block every other shape with a push-gate hook; all of them want this
   one).
 - **If §2 gave the card a plan, the PR body carries it too**, under `## Plan` — the real
-  file list and check this time, not the plain-word version from the FYI comment. Diverged
+  file list and the real check this time: the FYI comment left the files out and put
+  the check in plain words. Diverged
   from it while building? Update `## Plan` in place with the one-line reason, rather than
   leaving the original text to go stale.
 - **A symptom card is not done until the symptom is checked again.** A card that reports
