@@ -17,7 +17,12 @@ A headless Claude Code loop that turns a GitHub Projects board into merged PRs. 
   receipts) come from the project's own `CLAUDE.md`, never hard-coded here.
 - `commands/triage.md` — the `/triage` contract, the triage lane's tick: put the one
   `agent:` label on an unlabeled card, record what it waits on, stop. Generic the same way.
-- `agents/reviewer.md` — the one review pass. Read-only, blocking findings only, one round.
+- `agents/reviewer.md` — the last review pass, run on every change that touches source or
+  scripts. Read-only, blocking findings only, one round.
+- `agents/usability.md` — a second, earlier review pass, run on any change that touches a
+  screen, before `reviewer`. Sees only the card's ask and the pictures — never the diff —
+  and blocks when the person the card names could not do the thing from a phone shot.
+  Read-only, blocking findings only, one round.
 - `bin/board.py`, `bin/worktree.sh` — the board CLI and the worktree helper. `bin/test-board.py`
   is `board.py`'s offline suite — the Needs-Steve comment reading (`ask`, and `images`: the
   mockups and screenshots under a Stuck comment's `Look:` section, which `bin/floor.py` shows
@@ -193,7 +198,7 @@ above:
 - **Merge your own PR on green and a clean review — including a change to the gate.**
   Steve never merges here, the same as riffmap (September 28, 2026: "I don't want to review
   all of these merges since I am only involved at the card / feature level"). The gate is
-  `.github/workflows/`, `agents/reviewer.md`, the ship-and-merge rules in
+  `.github/workflows/`, `agents/reviewer.md`, `agents/usability.md`, the ship-and-merge rules in
   `commands/watch.md` §3, "Hard rules for every agent" in `docs/how-it-works.md`,
   everything under `deploy/`, and the replay suite (`bin/eval.sh`, `evals/`). A change to
   any of it **always gets the reviewer**, even when it looks like prose or config, and
