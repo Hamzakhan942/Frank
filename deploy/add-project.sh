@@ -16,13 +16,16 @@
 #
 #   deploy/add-project.sh riffmap roloc/riffmap
 #
-# Env (TEMPLATE_BOARD is required; the rest have sane defaults):
+# Env (everything has a sane default; TEMPLATE_BOARD is optional — card #156):
 #   TEMPLATE_BOARD     <owner>/<number> of a clean, existing board to copy — Status
 #                      (Backlog/Ready/In progress/In review/Done/Stuck - Needs help),
 #                      Stage and Priority already set up, no live cards on it. `gh project
 #                      copy` works on any project the caller can read; it does not need to
 #                      be marked as a GitHub "template" (mark-template is organization-only
 #                      anyway — a personal board like this one's can never carry that flag).
+#                      Unset: a forker has no such board to point at, so this builds one
+#                      from nothing instead — `gh project create`, then the Status, Stage
+#                      and Priority fields built to match what bin/doctor.sh requires.
 #   BOARD_OWNER        who owns the new board                   (default: the owner in <owner/repo>)
 #   BOT_LOGIN           the bot account the watcher runs as      (default: riffmap-bot)
 #   REQUIRED_CHECK      the CI check name to require on main     (default: verify)
@@ -34,7 +37,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WATCHER_ROOT="$(dirname "$HERE")"
+WATCHER_ROOT="${WATCHER_ROOT:-$(dirname "$HERE")}"
 WATCHER_GH="${WATCHER_GH:-gh}"
 
 usage() { echo "usage: deploy/add-project.sh <name> <owner/repo>" >&2; exit 64; }
@@ -48,9 +51,11 @@ BOARD_OWNER="${BOARD_OWNER:-$REPO_OWNER}"
 BOT_LOGIN="${BOT_LOGIN:-riffmap-bot}"
 REQUIRED_CHECK="${REQUIRED_CHECK:-verify}"
 ADD_PROJECT_YES="${ADD_PROJECT_YES:-0}"
-[ -n "${TEMPLATE_BOARD:-}" ] || { echo "add-project.sh: set TEMPLATE_BOARD=<owner>/<number> (a clean board to copy)" >&2; exit 64; }
-TEMPLATE_OWNER="${TEMPLATE_BOARD%%/*}"
-TEMPLATE_NUMBER="${TEMPLATE_BOARD##*/}"
+TEMPLATE_BOARD="${TEMPLATE_BOARD:-}"
+if [ -n "$TEMPLATE_BOARD" ]; then
+  TEMPLATE_OWNER="${TEMPLATE_BOARD%%/*}"
+  TEMPLATE_NUMBER="${TEMPLATE_BOARD##*/}"
+fi
 
 say() { printf '\n== %s ==\n' "$*"; }
 
@@ -86,7 +91,93 @@ EOF
     ;;
 esac
 
-# --- the board: find-or-copy, then link the repo ------------------------------------------
+# --- the board's required fields, for when there is no template to copy (card #156) -------
+# bin/doctor.sh is the spec: the board this builds is the board it accepts, and it checks
+# by presence only, never order — so idempotency matches the same way, order-independent.
+# Status is built-in on every new project, with GitHub's own default options; Stage and
+# Priority don't exist yet on a fresh board. On a rerun, once a field already carries
+# everything required (in any order, extras allowed), it is touched not at all. Short of
+# that: on a board THIS run just created ($BOARD_FRESH=1 — nothing could have a card on it
+# yet, so there is nothing to protect), Status gets replaced outright, discarding GitHub's
+# own defaults. On a board that already existed, nothing already there is ever discarded —
+# a card may already carry one of those values — so the field keeps every option it has,
+# by id, and gains only what's missing.
+STATUS_REQUIRED='[{"name":"Backlog","color":"GRAY","description":""},{"name":"Ready","color":"BLUE","description":""},{"name":"In progress","color":"YELLOW","description":""},{"name":"In review","color":"ORANGE","description":""},{"name":"Done","color":"GREEN","description":""},{"name":"Stuck - Needs help","color":"RED","description":""}]'
+STAGE_REQUIRED='[{"name":"Waiting","color":"GRAY","description":""},{"name":"Claimed","color":"BLUE","description":""},{"name":"Designing","color":"PURPLE","description":""},{"name":"Building","color":"YELLOW","description":""},{"name":"Testing","color":"ORANGE","description":""},{"name":"Reviewing","color":"PINK","description":""},{"name":"PR open","color":"GREEN","description":""},{"name":"Merging","color":"BLUE","description":""},{"name":"Parked","color":"RED","description":""}]'
+PRIORITY_REQUIRED='[{"name":"P0","color":"RED","description":""},{"name":"P1","color":"YELLOW","description":""},{"name":"P2","color":"GRAY","description":""}]'
+
+# ensure_field <field-name> <required-json> — reads $FIELDS_JSON and $BOARD_FRESH (the
+# caller sets both first). Prints one plan, for apply_field to carry out:
+#   SKIP
+#   CREATE
+#   <name1,name2,...>
+#   REPLACE
+#   <field-id>
+#   <inline GraphQL option list, one line>
+ensure_field() {
+  python3 - "$FIELDS_JSON" "$BOARD_FRESH" "$1" "$2" <<'PY'
+import json, sys
+fields_json, fresh, name, required_json = sys.argv[1:5]
+fields = {f["name"]: f for f in json.loads(fields_json).get("fields", [])}
+required = json.loads(required_json)
+f = fields.get(name)
+if not f or f.get("type") != "ProjectV2SingleSelectField":
+    print("CREATE")
+    print(",".join(o["name"] for o in required))
+    sys.exit(0)
+existing = f.get("options", [])
+existing_names = [o["name"] for o in existing]
+required_names = [o["name"] for o in required]
+if set(required_names) <= set(existing_names):
+    print("SKIP")
+    sys.exit(0)
+missing = [o for o in required if o["name"] not in existing_names]
+if fresh == "1":
+    new_options = required
+else:
+    kept = [{"id": o["id"], "name": o["name"], "color": "GRAY", "description": ""} for o in existing]
+    new_options = kept + missing
+def lit(o):
+    idpart = ('id: %s, ' % json.dumps(o["id"])) if "id" in o else ""
+    return "{%sname: %s, color: %s, description: %s}" % (
+        idpart, json.dumps(o["name"]), o["color"], json.dumps(o.get("description", "")))
+print("REPLACE")
+print(f["id"])
+print("[" + ", ".join(lit(o) for o in new_options) + "]")
+PY
+}
+
+apply_field() {
+  local name="$1" plan action
+  plan="$(ensure_field "$name" "$2")"
+  action="$(echo "$plan" | sed -n 1p)"
+  case "$action" in
+    SKIP)
+      echo "  $name: already has the required options (unchanged)"
+      ;;
+    CREATE)
+      $WATCHER_GH project field-create "$BOARD_NUMBER" --owner "$BOARD_OWNER" --name "$name" \
+        --data-type SINGLE_SELECT --single-select-options "$(echo "$plan" | sed -n 2p)" >/dev/null
+      echo "  $name: created"
+      ;;
+    REPLACE)
+      local field_id options
+      field_id="$(echo "$plan" | sed -n 2p)"
+      options="$(echo "$plan" | sed -n 3p)"
+      $WATCHER_GH api graphql -f query="mutation { updateProjectV2Field(input: {fieldId: \"$field_id\", singleSelectOptions: $options}) { projectV2Field { ... on ProjectV2SingleSelectField { id } } } }" >/dev/null
+      echo "  $name: set its options"
+      ;;
+  esac
+}
+
+ensure_board_fields() {
+  FIELDS_JSON="$($WATCHER_GH project field-list "$BOARD_NUMBER" --owner "$BOARD_OWNER" --format json)"
+  apply_field "Status" "$STATUS_REQUIRED"
+  apply_field "Stage" "$STAGE_REQUIRED"
+  apply_field "Priority" "$PRIORITY_REQUIRED"
+}
+
+# --- the board: find, copy or build it from nothing, then link the repo ------------------
 say "the board"
 existing="$($WATCHER_GH project list --owner "$BOARD_OWNER" --format json | python3 -c '
 import json, sys
@@ -97,11 +188,19 @@ for p in json.load(sys.stdin)["projects"]:
 ' "$NAME")"
 if [ -n "$existing" ]; then
   BOARD_NUMBER="$existing"
+  BOARD_FRESH=0
   echo "  board \"$NAME\" already exists for $BOARD_OWNER: #$BOARD_NUMBER (unchanged)"
-else
+elif [ -n "$TEMPLATE_BOARD" ]; then
   BOARD_NUMBER="$($WATCHER_GH project copy "$TEMPLATE_NUMBER" --source-owner "$TEMPLATE_OWNER" \
     --target-owner "$BOARD_OWNER" --title "$NAME" --format json --jq .number)"
   echo "  copied $TEMPLATE_OWNER/#$TEMPLATE_NUMBER → $BOARD_OWNER/#$BOARD_NUMBER, titled \"$NAME\""
+else
+  BOARD_NUMBER="$($WATCHER_GH project create --owner "$BOARD_OWNER" --title "$NAME" --format json --jq .number)"
+  BOARD_FRESH=1
+  echo "  created $BOARD_OWNER/#$BOARD_NUMBER, titled \"$NAME\""
+fi
+if [ -z "$TEMPLATE_BOARD" ]; then
+  ensure_board_fields
 fi
 $WATCHER_GH project link "$BOARD_NUMBER" --owner "$BOARD_OWNER" --repo "$REPO" >/dev/null
 echo "  linked to $REPO"
