@@ -12,7 +12,6 @@
 #                                 project on the box gets /watch and the reviewer
 #   /home/watcher/projects/<p>    each project's main checkout (cloned by `install.sh <p>`)
 set -euo pipefail
-REPO_URL="${WATCHER_REPO:-https://github.com/roloc/watcher.git}"
 # Card #106: deploy/autodeploy.sh's own release-folder swap runs this from a FRESH clone it
 # just made, never from /opt/watcher itself — WATCHER_DIR is how it says so (every
 # self-reference below reads $WATCHER_DIR, never the literal path). An ordinary by-hand run
@@ -21,6 +20,40 @@ WATCHER_DIR="${WATCHER_DIR:-/opt/watcher}"
 # Same default deploy/autodeploy.sh's own DEPLOY_CANARY_DIR and bin/spawn.sh's own
 # WATCHER_CANARY_DIR already use (card #46).
 WATCHER_CANARY_DIR="${WATCHER_CANARY_DIR:-/opt/watcher-canary}"
+# Card #157: no fork should ever clone `roloc/watcher` by default. When $WATCHER_DIR is
+# already a git checkout (the ordinary by-hand install: clone your own fork there first,
+# per README, then run this), its own `origin` IS the fork's URL, so that is read instead
+# of asked for. Only when there is no checkout to read one from — nothing at $WATCHER_DIR
+# yet, or a copy with no `.git` at all (README's "or rsync it in") — does this require
+# WATCHER_REPO.
+if [ -d "$WATCHER_DIR/.git" ]; then
+  if [ -n "${WATCHER_REPO:-}" ]; then
+    REPO_URL="$WATCHER_REPO"
+  else
+    # Every other git call on $WATCHER_DIR in this file runs as the watcher user (see
+    # canary_clone's own comment below): git refuses to read a repo owned by someone
+    # else ("dubious ownership"), and by the time the watcher user exists, $WATCHER_DIR
+    # already is watcher's (autodeploy.sh's release folders always are — this ran as
+    # root straight on one once and broke every deploy). On the very first run, before
+    # `useradd` below has even happened, nothing has chowned anything yet, so whoever
+    # is running this script (root, per the header above) still owns the checkout it
+    # just made by hand — a plain call is correct there, and only there. `|| true` on
+    # the git call itself: under `set -e`, a failing command substitution would kill
+    # the whole script right here, for a value nothing downstream even reads in this
+    # branch (next comment).
+    if id watcher >/dev/null 2>&1; then
+      REPO_URL="$(su - watcher -c "git -C '$WATCHER_DIR' remote get-url origin" 2>/dev/null || true)"
+    else
+      REPO_URL="$(git -C "$WATCHER_DIR" remote get-url origin 2>/dev/null || true)"
+    fi
+    # Never required here (no `:?`, unlike the else branch below): REPO_URL is read ONLY
+    # at the one-time clone further down, which this branch's own `.git` check already
+    # rules out — so a git/su hiccup deriving it for its own sake must never abort an
+    # install that was never going to read it.
+  fi
+else
+  REPO_URL="${WATCHER_REPO:?install.sh: set WATCHER_REPO=<the git URL of your fork> — $WATCHER_DIR is missing, or not a git checkout (a copy made by rsync has no origin to read), so there is nothing to derive it from}"
+fi
 
 # canary_clone: makes $WATCHER_CANARY_DIR a clone of $WATCHER_DIR — fast, local, no network
 # and so no login root never has — with its own `origin` set to the TRUE upstream, read from

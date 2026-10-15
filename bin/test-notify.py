@@ -20,6 +20,12 @@ os.environ.pop("BOARD_OWNER", None)
 
 import notify  # noqa: E402
 import board   # noqa: E402
+# board.py requires OWNER lazily, only where it is actually used (card #157) — a move to
+# Stuck below calls announce(), which needs one for the board-URL it posts to Discord.
+# Set directly on the module, never through BOARD_OWNER in the environment: this suite
+# tests notify.py's own "Needs Steve:" fallback, which reads OWNER_LOGIN/BOARD_OWNER live
+# at call time, and those stay unset.
+board.OWNER = "test-owner"
 
 CARD = {"number": 87, "title": "Add speaker names", "url": "https://github.com/o/r/issues/87"}
 PR = {"url": "https://github.com/o/r/pull/90", "state": "OPEN"}
