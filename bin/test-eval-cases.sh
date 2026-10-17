@@ -353,5 +353,110 @@ expect_fail "symptom-survives/closed outright" "card status"
 expect_fail "symptom-survives/closed outright" "no 'Needs @fixture-owner:' comment"
 done_with_case
 
+# =========================================================================================
+# owner-comment-redirects-triage: the first /triage case (riffmap#778) — the owner's newest
+# comment is the ask, and "this step is the owner's" is not an outcome
+# =========================================================================================
+
+FYIS="$SUITE_TMP/fyis"; mkdir -p "$FYIS"
+
+# Right: labeled for the builder, the Why quoting the owner's sentence, no move, no Needs.
+cat > "$FYIS/builder-quotes-owner.md" <<'EOF'
+🤖 FYI: I labeled this for the builder lane.
+- Why: your newest comment is the ask — "Please run the send yourself with the credentials and try different escaping of the password" — after the live check failed with a 535.
+- Waits on: nothing.
+- Nothing for the owner to do — change the label if you disagree.
+EOF
+# Wrong: labeled right, but the Why reads from the body's Verification section.
+cat > "$FYIS/builder-quotes-body.md" <<'EOF'
+🤖 FYI: I labeled this for the builder lane.
+- Why: the card is about the box's mail setup; only you can open the admin page and read your inbox, so the builder gets what is left.
+- Waits on: nothing.
+- Nothing for the owner to do — change the label if you disagree.
+EOF
+# Wrong: another lane.
+cat > "$FYIS/architect.md" <<'EOF'
+🤖 FYI: I labeled this for the architect lane.
+- Why: whether to keep sending through Gmail after a 535 is a decision, not a build.
+- Waits on: nothing.
+- Nothing for the owner to do — change the label if you disagree.
+EOF
+# Wrong: labeled right, the owner's 535 quoted — and the body's Verification line kept next to it.
+cat > "$FYIS/builder-quotes-both.md" <<'EOF'
+🤖 FYI: I labeled this for the builder lane.
+- Why: the live check failed with a 535, but only you can open the admin page and read your inbox, so the builder takes what is left.
+- Waits on: nothing.
+- Nothing for the owner to do — change the label if you disagree.
+EOF
+# The same ask again, off the template: no bold on the first line.
+cat > "$FYIS/needs-again-unbolded.md" <<'EOF'
+🤖 Needs @fixture-owner: run the live check from the admin page — only you can read your inbox.
+EOF
+# The riffmap#778 shape itself: the same Needs again, and the card handed back.
+cat > "$FYIS/needs-again.md" <<'EOF'
+🤖 **Needs @fixture-owner: run the live check from the admin page**
+
+- Card: move the box's mail to a Gmail app password
+- Done so far: read the card — no agent lane fits a step only you can take
+- Blocker: only you can open the admin page and read your inbox
+
+**Question: can you press Send test mail and say here whether it arrived?**
+- **A. Run it and reply here** (recommended)
+- **B. Not now**
+
+Reply A or B on this card, then move it back to **In progress**.
+EOF
+
+# labeled_for <agent> — what triage.md §4 leaves behind after the FYI: stage, then the label.
+labeled_for() { card_edit "it['stage']='Waiting'; it['labels'].append('agent: $1')"; printf 'board stage 100 Waiting\ngh issue edit 100 --add-label agent: %s\n' "$1" >> "$EVAL_LOG"; }
+
+build_case owner-comment-redirects-triage
+comment_from "$FYIS/builder-quotes-owner.md"; labeled_for builder
+run_check
+expect_clean "owner-comment/right"
+done_with_case
+
+build_case owner-comment-redirects-triage
+comment_from "$FYIS/needs-again.md"; parked_in_stuck
+printf 'board move 100 Stuck - Needs help\n' >> "$EVAL_LOG"
+run_check
+expect_fail "owner-comment/the #778 shape" "no agent: builder label"
+expect_fail "owner-comment/the #778 shape" "card status" "Stuck - Needs help"
+expect_fail "owner-comment/the #778 shape" "a board move happened"
+expect_fail "owner-comment/the #778 shape" "a new Needs comment was posted" "2 Needs comment(s)"
+expect_fail "owner-comment/the #778 shape" "no FYI naming builder"
+done_with_case
+
+build_case owner-comment-redirects-triage
+comment_from "$FYIS/builder-quotes-body.md"; labeled_for builder
+run_check
+expect_ok   "owner-comment/body quoted" "agent: builder is on the card"
+expect_ok   "owner-comment/body quoted" "FYI names builder"
+expect_fail "owner-comment/body quoted" "FYI's Why does not quote the owner's comment" "only you can open the admin page"
+done_with_case
+
+build_case owner-comment-redirects-triage
+comment_from "$FYIS/builder-quotes-both.md"; labeled_for builder
+run_check
+expect_ok   "owner-comment/both quoted" "agent: builder is on the card"
+expect_fail "owner-comment/both quoted" "FYI's Why does not quote the owner's comment" "only you can open the admin page"
+done_with_case
+
+# Labeled, never moved — and the same Needs posted again anyway, unbolded.
+build_case owner-comment-redirects-triage
+comment_from "$FYIS/needs-again-unbolded.md"; comment_from "$FYIS/builder-quotes-owner.md"; labeled_for builder
+run_check
+expect_ok   "owner-comment/unbolded Needs" "card still In progress"
+expect_fail "owner-comment/unbolded Needs" "a new Needs comment was posted" "2 Needs comment(s)"
+done_with_case
+
+build_case owner-comment-redirects-triage
+comment_from "$FYIS/architect.md"; labeled_for architect
+run_check
+expect_fail "owner-comment/wrong lane" "no agent: builder label" "agent: architect"
+expect_fail "owner-comment/wrong lane" "no FYI naming builder" "architect lane"
+expect_ok   "owner-comment/wrong lane" "no new Needs comment posted"
+done_with_case
+
 echo "$n check(s), $([ "$fail" = 0 ] && echo "all passed" || echo "SOME FAILED")"
 exit "$fail"
