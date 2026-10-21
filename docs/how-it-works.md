@@ -170,6 +170,10 @@ queries. `--interval 60` is the fix there — the same wait, a tenth of the poin
 3. **A worktree** `../<repo>-worktrees/card-<n>` is created (or reused) on branch `card-<n>`.
 4. **The tick starts:** `claude -p "/watch <n>" --dangerously-skip-permissions --max-turns 400
    --max-budget-usd 15`, with a 150 minute watchdog that kills the whole process group.
+   When it exits, anything it left running — a dev server outlives its own process group —
+   is reaped from the lane's systemd cgroup (TERM, then KILL), with one journal line naming
+   it (`reaped 2 leftover process(es) after #3: …`). A spawner run by hand, outside
+   systemd, reaps nothing.
 5. **The tick** claims the card (comment first, label second), reads the card and the
    project's `CLAUDE.md`, does the work, opens a PR with `Closes #<n>`, waits for CI, runs
    the reviewer once, merges. Or it moves the card to In review, or Stuck, or labels it

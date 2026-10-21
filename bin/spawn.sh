@@ -1017,6 +1017,77 @@ prepare_worktree() {
 }
 
 # --- section 1, steps 5 (launch) + 6 (watchdog) -------------------------------------------
+# --- leftover processes ------------------------------------------------------------------
+# The group kill at the end of launch_tick only reaches processes still in the tick's own
+# process group, and a tick's Bash tool calls do not stay in it: a dev server started there
+# (`npm run dev &` … `kill $!`, watch.md's own pattern) leaves the real server behind once
+# npm is killed, in a group of its own. kcp-roi-calculator#3, October 21, 2026: a vite left
+# running in card-3 rewrote `.vite/` while `git worktree remove` was deleting it, the
+# remove failed with "Directory not empty", and the half-deleted worktree and its branch
+# were left behind for good.
+#
+# A process group can be left; the unit's control group cannot. Under systemd every
+# process the tick ever started is in this lane's own `watcher@<name>.service` cgroup, and
+# between ticks the only process that belongs there is this script. So after every tick,
+# everything else in it is a leftover — TERM, a few seconds' grace, then KILL.
+#
+# lane_cgroup_procs prints the cgroup.procs file to read, or nothing. Nothing — no reaping
+# — unless this is a systemd service (INVOCATION_ID set, cgroup v2, a `.service` path):
+# `spawn.sh --once` run by hand from an ssh session sits in that session's scope, and
+# reaping THAT would kill the person's own shell. WATCHER_CGROUP_PROCS overrides it
+# (tests only: a Mac has no cgroups).
+lane_cgroup_procs() {
+  if [ -n "${WATCHER_CGROUP_PROCS+set}" ]; then printf '%s' "$WATCHER_CGROUP_PROCS"; return 0; fi
+  [ -n "${INVOCATION_ID:-}" ] && [ -r /proc/self/cgroup ] || return 0
+  local line path=""
+  while IFS= read -r line; do
+    case "$line" in 0::*) path="${line#0::}" ;; esac
+  done < /proc/self/cgroup
+  case "$path" in *.service) printf '%s' "/sys/fs/cgroup$path/cgroup.procs" ;; esac
+  return 0
+}
+
+# proc_name <pid> — what a leftover was, for the journal line ("vite", "esbuild").
+proc_name() {
+  local name=""
+  if [ -r "/proc/$1/comm" ]; then read -r name < "/proc/$1/comm" || true; fi
+  [ -n "$name" ] || name="$(ps -o comm= -p "$1" 2>/dev/null || true)"
+  name="${name##*/}"
+  printf '%s' "${name:-?}"
+}
+
+reap_leftovers() {
+  local n="$1" procs pid left="" names="" alive tries=0
+  procs="$(lane_cgroup_procs)"
+  [ -n "$procs" ] && [ -r "$procs" ] || return 0
+  # A builtin `read`, never `cat`: a child of this script reading the file would list
+  # itself. Everything but this script ($$ — `exec` keeps it across follow_pointer) is
+  # left over: the tick and the watchdog have both been waited for by now.
+  while read -r pid; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [ "$pid" = "$$" ] && continue
+    kill -0 "$pid" 2>/dev/null || continue
+    left="$left $pid"
+    names="$names $(proc_name "$pid")($pid)"
+  done < "$procs"
+  [ -n "$left" ] || return 0
+
+  # shellcheck disable=SC2086  # $left is a list of bare pids
+  kill -TERM $left 2>/dev/null || true
+  while [ "$tries" -lt 5 ]; do
+    alive=""
+    for pid in $left; do if kill -0 "$pid" 2>/dev/null; then alive="$alive $pid"; fi; done
+    [ -n "$alive" ] || break
+    wsleep 1
+    tries=$((tries + 1))
+  done
+  alive=""
+  for pid in $left; do if kill -0 "$pid" 2>/dev/null; then alive="$alive $pid"; fi; done
+  # shellcheck disable=SC2086
+  if [ -n "$alive" ]; then kill -KILL $alive 2>/dev/null || true; fi
+  log "reaped $(echo $left | wc -w | tr -d ' ') leftover process(es) after #$n:$names${alive:+ (KILL needed for$alive)}"
+}
+
 launch_tick() {
   local n="$1" dir="$2" ts out err rc
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -1103,6 +1174,7 @@ launch_tick() {
   # know for certain the main wait has returned — anything the tick left running behind
   # it (a killed tick's own Bash subprocesses) dies with it, not as an orphan.
   kill -TERM -- "-$tick_pid" 2>/dev/null || true
+  reap_leftovers "$n"
 
   RESULT_JSON="$out"
   RESULT_RC="$rc"

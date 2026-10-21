@@ -22,6 +22,10 @@ set -uo pipefail
 # this lane's own environment fails those cases on a correct tree, the same shape as #34.
 # SLACK_WEBHOOK_URL and SLACK_MENTION (card #159) join for the identical reason: spawn.sh
 # exports both the same way.
+# INVOCATION_ID (October 21, 2026) is systemd's: with it set, spawn.sh reaps every other
+# process in its own service's cgroup after a tick — and this suite run from inside a lane's
+# tick is IN that lane's cgroup, so an inherited one would let a case kill the tick itself.
+unset INVOCATION_ID WATCHER_CGROUP_PROCS
 unset GH_REPO BOARD_OWNER BOARD_NUMBER WATCHER_HOME WATCHER_PROJECT LANE_AGENTS LANE_COMMAND LANE_WORKDIR READY_PULL WIP_MAX OWNER_LOGIN DISCORD_WEBHOOK_URL DISCORD_MENTION SLACK_WEBHOOK_URL SLACK_MENTION
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -276,6 +280,15 @@ TERMSCRIPT
     sleep "$CLAUDE_TICK_SLEEP"
   fi
 fi
+# CLAUDE_LEAVE_BEHIND=<pidfile> (October 21, 2026): start a sleep in a process group of its
+# own — the way a dev server outlives the Bash call that started it — write its pid there,
+# and, when $CLAUDE_CGROUP_FILE is set, list it and this stub's parent (spawn.sh) in that
+# file, standing in for the lane's cgroup.procs.
+if [ -n "${CLAUDE_LEAVE_BEHIND:-}" ]; then
+  perl -e 'setpgrp(0,0); exec @ARGV' sleep 300 </dev/null >/dev/null 2>&1 &
+  echo $! > "$CLAUDE_LEAVE_BEHIND"
+  if [ -n "${CLAUDE_CGROUP_FILE:-}" ]; then printf '%s\n%s\n' "$PPID" "$!" >> "$CLAUDE_CGROUP_FILE"; fi
+fi
 printf '{"subtype":"%s","total_cost_usd":%s,"num_turns":%s,"permission_denials":%s}\n' \
   "${CLAUDE_SUBTYPE:-success}" "${CLAUDE_COST:-0.01}" "${CLAUDE_TURNS:-1}" "${CLAUDE_DENIALS:-0}"
 exit "${CLAUDE_RC:-0}"
@@ -464,6 +477,7 @@ run() {
   CLAUDE_COST="${CLAUDE_COST:-0.01}" CLAUDE_TURNS="${CLAUDE_TURNS:-1}" CLAUDE_DENIALS="${CLAUDE_DENIALS:-0}" \
   CLAUDE_TICK_SLEEP="${CLAUDE_TICK_SLEEP:-}" CLAUDE_BG_SLEEP_MARKER="${CLAUDE_BG_SLEEP_MARKER:-}" \
   CLAUDE_FLIP_POINTER="${CLAUDE_FLIP_POINTER:-}" \
+  CLAUDE_LEAVE_BEHIND="${CLAUDE_LEAVE_BEHIND:-}" CLAUDE_CGROUP_FILE="${CLAUDE_CGROUP_FILE:-}" \
   CLAUDE_BG_TERM_COUNT_FILE="${CLAUDE_BG_TERM_COUNT_FILE:-}" \
   CLAUDE_UNTRUSTED_ONCE_MARKER="${CLAUDE_UNTRUSTED_ONCE_MARKER:-}" \
   CLAUDE_UNTRUSTED_ALWAYS="${CLAUDE_UNTRUSTED_ALWAYS:-}" \
@@ -2331,6 +2345,67 @@ if [ "$header_vars" != "$scratch_example_vars" ]; then
 else
   flunk "the check missed a var added only to example.env.txt"
 fi
+
+# ============================================================================
+echo "38. a process the tick left running is reaped after the tick (kcp-roi-calculator#3)"
+# October 21, 2026: a vite started in card-3 outlived its tick in a process group of its
+# own, so launch_tick's group kill never reached it; it rewrote .vite/ while `git worktree
+# remove` was deleting the folder, and the remove failed. On main this case's leftover
+# survives the tick.
+fresh_state
+board_list $'380\tP1\tbuilder\t-\tCard three eighty'
+board_show '{"number":380,"state":"OPEN","status":"In progress","labels":[]}'
+: > "$STATE/cgroup.procs"
+CLAUDE_LEAVE_BEHIND="$STATE/leftover.pid" CLAUDE_CGROUP_FILE="$STATE/cgroup.procs" \
+  WATCHER_CGROUP_PROCS="$STATE/cgroup.procs" run --once >/dev/null 2>"$TMP/reap380.err"; RC=$?
+left="$(cat "$STATE/leftover.pid" 2>/dev/null)"
+if [ -n "$left" ] && ! kill -0 "$left" 2>/dev/null; then pass "the leftover (its own process group, out of the tick's) is dead after the tick"; else flunk "leftover still running" "pid=[$left] $(cat "$TMP/reap380.err")"; kill -KILL "$left" 2>/dev/null; fi
+if grep -qE "reaped 1 leftover process\(es\) after #380: sleep\($left\)" "$TMP/reap380.err"; then pass "one journal line names what was reaped"; else flunk "reap log line" "$(cat "$TMP/reap380.err")"; fi
+if [ "$RC" = 0 ] && grep -qF "tick #380 exited rc=0" "$TMP/reap380.err"; then pass "spawn.sh itself, listed in the same cgroup, survives and carries on"; else flunk "spawn.sh did not survive its own reap" "rc=$RC $(cat "$TMP/reap380.err")"; fi
+
+echo "38b. …but a spawn.sh run by hand (no INVOCATION_ID: not a systemd service) reaps nothing"
+# The cgroup of a hand run is the person's own ssh session; reaping it would kill their shell.
+fresh_state
+board_list $'381\tP1\tbuilder\t-\tCard three eighty-one'
+board_show '{"number":381,"state":"OPEN","status":"In progress","labels":[]}'
+CLAUDE_LEAVE_BEHIND="$STATE/leftover.pid" run --once >/dev/null 2>"$TMP/reap381.err"
+left="$(cat "$STATE/leftover.pid" 2>/dev/null)"
+if [ -n "$left" ] && kill -0 "$left" 2>/dev/null && ! grep -q "reaped" "$TMP/reap381.err"; then pass "nothing reaped outside a systemd service"; else flunk "a hand run reaped" "pid=[$left] $(cat "$TMP/reap381.err")"; fi
+kill -KILL "$left" 2>/dev/null
+
+echo "38c. worktree.sh remove: a git remove that fails after the checks passed still finishes"
+# The same incident's other half: git had already deleted card-3's tracked files and its
+# .git link when it failed, so the folder could never pass the checks again and its branch
+# was never deleted. A `git` wrapper fails the way it did there.
+dir="$WORKTREE_BASE/card-382"
+rm -rf "$dir"; git -C "$FAKE_ROOT" worktree prune -q 2>/dev/null || true
+git -C "$FAKE_ROOT" branch -D card-382 >/dev/null 2>&1 || true
+git -C "$FAKE_ROOT" worktree add -q "$dir" -b card-382 --no-track origin/main
+mkdir -p "$TMP/gitwrap"
+REAL_GIT="$(command -v git)"
+cat > "$TMP/gitwrap/git" <<WRAP
+#!/usr/bin/env bash
+case " \$* " in
+  *" worktree remove "*)
+    d="\${@: -1}"; rm -f "\$d/.git" "\$d/root.txt"; mkdir -p "\$d/.vite/deps"
+    echo "error: failed to delete '\$d': Directory not empty" >&2; exit 1 ;;
+esac
+exec "$REAL_GIT" "\$@"
+WRAP
+chmod +x "$TMP/gitwrap/git"
+PATH="$TMP/gitwrap:$PATH" WORKTREE_ROOT="$FAKE_ROOT" bash "$HERE/worktree.sh" remove card-382 >"$TMP/wt382.out" 2>&1; RC=$?
+if [ "$RC" = 0 ] && [ ! -e "$dir" ]; then pass "the folder is gone, and remove exits 0"; else flunk "folder left behind" "rc=$RC $(cat "$TMP/wt382.out")"; fi
+if ! git -C "$FAKE_ROOT" rev-parse --verify -q card-382 >/dev/null; then pass "the branch is deleted too"; else flunk "branch card-382 left behind"; fi
+if ! git -C "$FAKE_ROOT" worktree list | grep -qF "card-382"; then pass "git no longer lists the worktree"; else flunk "worktree still listed" "$(git -C "$FAKE_ROOT" worktree list)"; fi
+
+echo "38d. …and uncommitted work still refuses before git is ever asked to remove anything"
+dir="$WORKTREE_BASE/card-383"
+rm -rf "$dir"; git -C "$FAKE_ROOT" worktree prune -q 2>/dev/null || true
+git -C "$FAKE_ROOT" branch -D card-383 >/dev/null 2>&1 || true
+git -C "$FAKE_ROOT" worktree add -q "$dir" -b card-383 --no-track origin/main
+echo "unsaved" > "$dir/new.txt"
+PATH="$TMP/gitwrap:$PATH" WORKTREE_ROOT="$FAKE_ROOT" bash "$HERE/worktree.sh" remove card-383 >"$TMP/wt383.out" 2>&1; RC=$?
+if [ "$RC" != 0 ] && [ -f "$dir/new.txt" ]; then pass "uncommitted file kept, remove refused"; else flunk "uncommitted work lost" "rc=$RC $(cat "$TMP/wt383.out")"; fi
 
 echo "$n cases, $( [ $fail = 0 ] && echo all passed || echo SOME FAILED )"
 exit $fail

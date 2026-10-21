@@ -294,7 +294,23 @@ cmd_remove() {
     echo "commits aren't on main). Cleaning up."
   fi
 
-  git -C "$MAIN" worktree remove "$dir"
+  if ! git -C "$MAIN" worktree remove "$dir"; then
+    # Everything above already established the work shipped and nothing untracked is
+    # left, so what git could not delete is ignored output — and a failed remove has
+    # already deleted the tracked files and the worktree's `.git` link, so the directory
+    # can never pass the checks above again. kcp-roi-calculator#3, October 21, 2026: a
+    # leftover vite rewrote `.vite/` mid-delete ("Directory not empty"), and card-3's
+    # folder and branch were stranded. Finish the job instead of leaving that behind.
+    echo "warning: git worktree remove failed after the checks passed; deleting $dir directly" >&2
+    rm -rf "$dir" || true
+    if [ -e "$dir" ]; then
+      echo "error: could not delete $dir — is something still running in it?" >&2
+      exit 1
+    fi
+    # Before `branch -D`: git will not delete a branch a registered worktree still has
+    # checked out, even one whose folder is gone.
+    git -C "$MAIN" worktree prune
+  fi
   # -D, not -d: after a squash merge git still considers the branch unmerged.
   # Safe only because everything above established the work shipped.
   git -C "$MAIN" branch -D "$branch" 2>/dev/null || true
