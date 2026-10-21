@@ -669,5 +669,39 @@ check("one clear line naming BOARD_OWNER, on stderr",
       "BOARD_OWNER is required" in real.stderr, real.stderr)
 check("never queries any board — nothing at all on stdout", real.stdout == "", real.stdout)
 
+print("26. an organization's board reads the same as a user's: both queries ask for any "
+      "owner, and a Stuck alert links the board's own URL (kcp-roi-calculator, October 21, "
+      "2026: `user(login:)` on an org's login failed every poll)")
+ORG_URL = "https://github.com/orgs/some-org/projects/3"
+
+
+def org_stub_run(cmd, **kwargs):
+    if cmd[:3] != ["gh", "api", "graphql"]:
+        return stub_run(cmd, **kwargs)
+    kv = _graphql_kv(cmd)
+    GRAPHQL_CALLS.append(kv["query"])
+    if "fields(first:40)" in kv["query"]:
+        payload = {"user": {"projectV2": {"id": "PVT_3", "title": "t", "url": ORG_URL,
+                                          "fields": {"nodes": []}}}}
+    else:
+        payload = {"user": {"projectV2": {"items": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}}}
+    return FakeResult(json.dumps({"data": payload}))
+
+
+board.subprocess.run = org_stub_run
+board.OWNER, board.NUMBER = "some-org", 3
+GRAPHQL_CALLS.clear()
+board.items(fresh=True)
+board.project(fresh=True)
+check("both queries ask for any owner, never a user alone",
+      len(GRAPHQL_CALLS) == 2 and all("repositoryOwner(login:$owner)" in q
+                                      and "... on ProjectV2Owner" in q
+                                      and "user(login:" not in q for q in GRAPHQL_CALLS),
+      GRAPHQL_CALLS)
+check("the Stuck alert's board link is the board's own /orgs/ URL",
+      board._board_url() == ORG_URL, board._board_url())
+board.subprocess.run = stub_run
+
 print(f"{count} cases, {'all passed' if not fails else 'FAILURES ABOVE'}")
 sys.exit(fails)

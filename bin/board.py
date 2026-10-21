@@ -105,7 +105,14 @@ STUCK_STATUS = "Stuck - Needs help"
 
 
 def _board_url():
-    return f"https://github.com/users/{_require_owner()}/projects/{NUMBER}"
+    # The board's own URL, from GitHub: /users/… for a personal board, /orgs/… for an
+    # organization's. The guess is only for a project() cache written before `url` was
+    # asked for.
+    try:
+        url = project()[0].get("url")
+    except SystemExit:
+        url = None
+    return url or f"https://github.com/users/{_require_owner()}/projects/{NUMBER}"
 
 
 # --- the board cache (card #98) ---------------------------------------------------------
@@ -447,9 +454,9 @@ def project(fresh=False):
             if cached is not None:
                 return cached["project"], cached["fields"]
         q = """query($owner:String!,$number:Int!){ rateLimit{ remaining resetAt limit cost }
-          user(login:$owner){ projectV2(number:$number){
-          id title
-          fields(first:40){ nodes{ ... on ProjectV2SingleSelectField{ name id options{ id name } } } } } } }"""
+          user: repositoryOwner(login:$owner){ ... on ProjectV2Owner { projectV2(number:$number){
+          id title url
+          fields(first:40){ nodes{ ... on ProjectV2SingleSelectField{ name id options{ id name } } } } } } } }"""
         try:
             u = gh(q, owner=OWNER, number=NUMBER).get("user")
         except RateLimitError as e:
@@ -457,8 +464,8 @@ def project(fresh=False):
             return stale["project"], stale["fields"]
         p = u.get("projectV2") if u else None
         if not p:
-            sys.exit(f"board.py: no project {OWNER}/#{NUMBER} — if it moved to an org, "
-                     "this script's user(login:) query needs to become organization(login:)")
+            sys.exit(f"board.py: no project {OWNER}/#{NUMBER} — check BOARD_OWNER and "
+                     "BOARD_NUMBER, and that this account can read the board")
         fields = {f["name"]: f for f in p["fields"]["nodes"] if f.get("name")}
         _cache_write(name, {"project": p, "fields": fields})
         return p, fields
@@ -530,13 +537,13 @@ def items(fresh=False):
 
 def _items_live():
     q = """query($owner:String!,$number:Int!,$cursor:String){ rateLimit{ remaining resetAt limit cost }
-      user(login:$owner){ projectV2(number:$number){
+      user: repositoryOwner(login:$owner){ ... on ProjectV2Owner { projectV2(number:$number){
       items(first:100, after:$cursor){ pageInfo{ hasNextPage endCursor }
         nodes{ id
           fieldValues(first:20){ nodes{ ... on ProjectV2ItemFieldSingleSelectValue{
             name field{ ... on ProjectV2SingleSelectField{ name } } } } }
           content{ ... on Issue{ number title url state
-            labels(first:20){ nodes{ name } } } } } } } } }"""
+            labels(first:20){ nodes{ name } } } } } } } } } }"""
     out, cursor = [], None
     while True:
         u = gh(q, owner=OWNER, number=NUMBER, cursor=cursor or "").get("user")
